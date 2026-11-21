@@ -1,0 +1,142 @@
+name: CI/CD
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: devops-final-app-de010
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate private database credentials
+        run: python3 scripts/prepare-env.py
+      - name: Validate configuration
+        run: bash scripts/validate.sh
+      - name: Image metadata
+        id: meta
+        working-directory: .
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}/app" >> "$GITHUB_OUTPUT"
+      - name: Build and start stack
+        env:
+          APP_IMAGE: ${{ steps.meta.outputs.image }}
+          APP_TAG: ${{ github.sha }}
+          APP_VERSION: ${{ github.sha }}
+        run: docker compose --env-file .runtime.env up -d --build --wait --wait-timeout 300
+      - name: Verify eight orders and deployed version
+        env:
+          EXPECTED_VERSION: ${{ github.sha }}
+        run: bash scripts/smoke-test.sh
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push tested image
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          SHA: ${{ github.sha }}
+        run: |
+          docker push "$IMAGE:$SHA"
+          docker tag "$IMAGE:$SHA" "$IMAGE:latest"
+          docker push "$IMAGE:latest"
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p evidence
+          docker compose --env-file .runtime.env ps -a > evidence/compose-ps.txt
+          docker compose --env-file .runtime.env logs --no-color > evidence/compose.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-evidence
+          path: devops-final-app-de010/evidence/
+      - name: Clean up disposable CI database
+        if: always()
+        run: docker compose --env-file .runtime.env down -v
+
+  deploy:
+    name: Deploy lên server
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Validate SSH secrets
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        working-directory: .
+        run: |
+          for key in SERVER_HOST SERVER_USER SERVER_SSH_KEY; do
+            if [ -z "${!key}" ]; then
+              echo "::error::Missing GitHub Actions secret: $key"
+              exit 1
+            fi
+          done
+      - name: Deploy exact tested commit over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          APP_IMAGE: ${{ needs.build.outputs.image }}
+          APP_TAG: ${{ github.sha }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+          DEPLOY_DIR: ${{ github.event.repository.name }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          command_timeout: 12m
+          envs: APP_IMAGE,APP_TAG,GHCR_USER,GHCR_TOKEN,REPO_URL,DEPLOY_DIR
+          script: |
+            set -eu
+            if [ ! -d "$HOME/$DEPLOY_DIR/.git" ]; then
+              git clone "$REPO_URL" "$HOME/$DEPLOY_DIR"
+            fi
+            cd "$HOME/$DEPLOY_DIR"
+            git fetch origin main
+            git checkout --detach "$APP_TAG"
+            cd devops-final-app-de010
+            export APP_IMAGE APP_TAG
+            export DOCKER_CONFIG="$(mktemp -d)"
+            trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            python3 scripts/prepare-env.py
+            bash scripts/validate.sh
+            docker compose --env-file .runtime.env pull
+            if ! docker compose --env-file .runtime.env up -d --no-build --wait --wait-timeout 300; then
+              docker compose --env-file .runtime.env ps -a
+              docker compose --env-file .runtime.env logs --tail 100
+              exit 1
+            fi
+            docker compose --env-file .runtime.env restart nginx
+            EXPECTED_VERSION="$APP_TAG" bash scripts/smoke-test.sh
+            docker compose --env-file .runtime.env ps

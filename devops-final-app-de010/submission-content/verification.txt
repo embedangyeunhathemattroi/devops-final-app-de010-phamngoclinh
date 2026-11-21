@@ -1,0 +1,17 @@
+Verification date: 2026-11-21
+- Local Docker multi-stage build: PASS (Gradle 8.14 / Java 21 / Spring Boot 4.0.0).
+- Local MySQL, app and Nginx healthchecks: PASS.
+- GET http://localhost:18099/api/orders: PASS, 8 orders.
+- GET http://localhost:18099/api/info: PASS, B24DTCN360, exam 010, version local.
+- Local port 18099 used because an existing project occupies 8099; deployment config remains 8099.
+- GitHub Actions syntax checked with actionlint: PASS.
+- Private env generator: PASS, generates credentials, preserves them on subsequent runs, mode 600 on Linux.
+- CI/CD update prepared for GitHub; consult latest Actions run for remote result.
+- Server deployment: NOT verified. New SERVER_SSH_KEY configured; matching public key still needs installation on server.
+- Public endpoint and requested screenshots: NOT verified/generated.
+
+GitHub run: https://github.com/embedangyeunhathemattroi/devops-final-app-de010-phamngoclinh/actions/runs/44852256757
+Commit: 34482ecf4e958101196646aaca6e219b7ed07b1f
+Remote Build & Test: SUCCESS, including 8-order/student/SHA checks and GHCR SHA/latest push.
+Deploy: FAILED at SSH. Secret reloaded using direct stdin file redirection; public key installation required.
+Screenshot status updated: screenshots/04-website.png is a real headless Chrome capture of http://localhost:18099/api/orders (local Docker, not public VPS; browser address bar is not included). Other screenshots are user-managed and have not been validated.

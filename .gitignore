@@ -1,0 +1,5 @@
+.idea/
+**/deploy_key*
+*.pem
+.ssh-known-hosts
+**/.runtime.env
